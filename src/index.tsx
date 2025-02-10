@@ -29,7 +29,7 @@ interface GridViewProps extends ScrollViewProps {
   locked?: (item: any, index?: number) => boolean
   onBeginDragging?: () => void
   onPressCell?: (item: any, index?: number) => void
-  onReleaseCell?: (data: any[]) => void
+  onReleaseCell?: (data: any[], top: number) => void
   onEndAddAnimation?: (item: any) => void
   onEndDeleteAnimation?: (item: any) => void
 }
@@ -291,19 +291,25 @@ const GridView = memo((props: GridViewProps) => {
     if (!selectedItem) return
   
     const { move, frame } = self
-   // Instead of using the flat index of the selected item, calculate the row index first.
-    const selectedIndex = self.items.indexOf(selectedItem);
-    const rowIndex = Math.floor(selectedIndex / numColumns);
-    // Use the first item's index of that row to determine the row height.
-    const firstItemIndex = rowIndex * numColumns;
-    const s = getRowHeight(firstItemIndex) / 2; // Use dynamic row height for the current row
-    let a = 0
-    if (move < top + s) {
-      a = Math.max(-s, move - (top + s)) // above
-    } else if (move > frame.height - bottom - s) {
-      a = Math.min(s, move - (frame.height - bottom - s)) // below
+    // Define separate auto-scroll zones for top and bottom.
+    const topScrollZone = 200;
+    const bottomScrollZone = 1;
+    let a = 0;
+  
+    if (move < top + topScrollZone) {
+      // When dragging near the top
+      a = Math.max(-topScrollZone, move - (top + topScrollZone));
+    } else if (move > frame.height - bottom - bottomScrollZone) {
+      // When dragging near the bottom
+      a = Math.min(bottomScrollZone, move - (frame.height - bottom - bottomScrollZone));
     }
-    a && scroll((a / s) * 10) // scrolling
+  
+    if (a) {
+      // Use the appropriate ratio depending on the drag direction.
+      const ratio = a < 0 ? a / topScrollZone : a / bottomScrollZone;
+      // Adjust the scroll amount as needed; here multiplying by 10.
+      scroll(ratio * 10);
+    }
   
     self.animationId = requestAnimationFrame(animate)
   }, [selectedItem])
@@ -332,6 +338,7 @@ const GridView = memo((props: GridViewProps) => {
         selectedItem.pos.setValue({ x, y })
         reorder(x, y)
         scrollView.scrollTo({ y: offY, animated: false })
+
       }
     },
     [selectedItem]
@@ -470,7 +477,8 @@ const GridView = memo((props: GridViewProps) => {
 
   const onEndRelease = useCallback(() => {
     // console.log('[GridView] onEndRelease')
-    onReleaseCell && onReleaseCell(self.items.map((v) => v.item))
+
+    onReleaseCell && onReleaseCell(self.items.map((v) => v.item), self.contentOffset)
     setSelectedItem(undefined)
   }, [onReleaseCell])
 
