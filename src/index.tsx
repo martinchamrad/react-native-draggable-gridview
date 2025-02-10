@@ -13,6 +13,8 @@ import _ from 'lodash'
 const { width: screenWidth } = Dimensions.get('window')
 
 interface GridViewProps extends ScrollViewProps {
+  adRowHeight?: number
+  scrollTop?: number
   numColumns?: number
   containerMargin?: ContainerMargin
   width?: number
@@ -60,6 +62,7 @@ interface Item {
 
 interface State {
   scrollView?: ScrollView
+  scrollTop?: Number,
   frame?: LayoutRectangle
   contentOffset: number
   numRows?: number
@@ -77,6 +80,7 @@ interface State {
 const GridView = memo((props: GridViewProps) => {
   const {
     data,
+    scrollTop,
     keyExtractor,
     renderItem,
     renderLockedItem,
@@ -95,7 +99,7 @@ const GridView = memo((props: GridViewProps) => {
   const right = rest.containerMargin?.right || 0
   const width = rest.width || screenWidth
   const activeOpacity = rest.activeOpacity || 0.5
-  const delayLongPress = rest.delayLongPress || 500
+  const delayLongPress = rest.delayLongPress || 200
   const selectedStyle = rest.selectedStyle || {
     shadowColor: '#000',
     shadowRadius: 8,
@@ -103,15 +107,30 @@ const GridView = memo((props: GridViewProps) => {
     elevation: 10,
   }
 
+  const adRowHeight = rest.adRowHeight || 149
   const [selectedItem, setSelectedItem] = useState<Item>(null)
   const self = useRef<State>({
     contentOffset: 0,
     grid: [],
     items: [],
     startPointOffset: 0,
+    scrollTop: 0
   }).current
 
+  const userOnScroll = rest.onScroll;
+  delete rest.onScroll;
   //-------------------------------------------------- Preparing
+
+    // Assume `getRowHeight` is a function that returns the height of a row based on its index
+    const getRowHeight = (index: number) => {
+      // Example logic: return different heights for different rows
+      const isAdRow  = index === 6 || index === 7 || index === 8
+      if (isAdRow) {
+        return adRowHeight;
+      }
+      return 149; // Alternate row heights
+    }
+
   const prepare = useCallback(() => {
     if (!data) return
     // console.log('[GridView] prepare')
@@ -128,19 +147,25 @@ const GridView = memo((props: GridViewProps) => {
   }, [data, selectedItem])
 
   const onUpdateGrid = useCallback(() => {
-    // console.log('[GridView] onUpdateGrid')
-    const cellSize = (width - left - right) / numColumns
-    self.cellSize = cellSize
-    self.numRows = Math.ceil(data.length / numColumns)
-    const grid: Point[] = []
+    const cellSize = (width - left - right) / numColumns;
+    self.cellSize = cellSize;
+    self.scrollTop = scrollTop;
+    self.numRows = Math.ceil(data.length / numColumns);
+    const grid: Point[] = [];
+    let currentY = 0;
+    
     for (let i = 0; i < data.length; i++) {
-      const x = (i % numColumns) * cellSize
-      const y = Math.floor(i / numColumns) * cellSize
-      grid.push({ x, y })
+      // Only at the start of a new row (except for the very first row), update the currentY.
+      if (i % numColumns === 0 && i !== 0) {
+        // Use the first item index of the previous row (i - numColumns) to calculate that row's height.
+        currentY += getRowHeight(i - numColumns);
+      }
+      const x = (i % numColumns) * cellSize;
+      grid.push({ x, y: currentY });
     }
-    self.grid = grid
-    onUpdateData()
-  }, [data, selectedItem])
+    self.grid = grid;
+    onUpdateData();
+  }, [data, selectedItem]);
 
   const onUpdateData = useCallback(() => {
     // console.log('[GridView] onUpdateData')
@@ -264,9 +289,14 @@ const GridView = memo((props: GridViewProps) => {
 
   const animate = useCallback(() => {
     if (!selectedItem) return
-
-    const { move, frame, cellSize } = self
-    const s = cellSize / 2
+  
+    const { move, frame } = self
+   // Instead of using the flat index of the selected item, calculate the row index first.
+    const selectedIndex = self.items.indexOf(selectedItem);
+    const rowIndex = Math.floor(selectedIndex / numColumns);
+    // Use the first item's index of that row to determine the row height.
+    const firstItemIndex = rowIndex * numColumns;
+    const s = getRowHeight(firstItemIndex) / 2; // Use dynamic row height for the current row
     let a = 0
     if (move < top + s) {
       a = Math.max(-s, move - (top + s)) // above
@@ -274,14 +304,22 @@ const GridView = memo((props: GridViewProps) => {
       a = Math.min(s, move - (frame.height - bottom - s)) // below
     }
     a && scroll((a / s) * 10) // scrolling
-
+  
     self.animationId = requestAnimationFrame(animate)
   }, [selectedItem])
 
   const scroll = useCallback(
     (offset: number) => {
-      const { scrollView, cellSize, numRows, frame, contentOffset } = self
-      const max = cellSize * numRows - frame.height + top + bottom
+      const { scrollView, numRows, frame, contentOffset } = self
+
+      // Calculate total content height based on rows (not per item)
+      const totalContentHeight = Array.from({ length: self.numRows }).reduce((acc, _, rowIndex) => {
+        const firstItemIndex = rowIndex * numColumns;
+        return acc + getRowHeight(firstItemIndex);
+      }, 0);
+
+      // Calculate max scroll offset using the total row height
+      const max = totalContentHeight - frame.height + top + bottom;
       const offY = Math.max(0, Math.min(max, contentOffset + offset))
       const diff = offY - contentOffset
       if (Math.abs(diff) > 0.2) {
@@ -310,9 +348,23 @@ const GridView = memo((props: GridViewProps) => {
     []
   )
 
+  // Merged onScroll
+  const handleInternalScroll = useCallback(
+    (e) => {
+      
+      // library logic
+      onScroll(e);
+      // parent's callback
+      if (!selectedItem && userOnScroll) {
+        userOnScroll(e);
+      }
+    },
+    [onScroll, userOnScroll]
+  );
+
   const onLongPress = useCallback(
     (item: string, index: number, position: Point) => {
-      if (self.animation) return
+      if (self.animation || index === data.length - 1) return
 
       // console.log('[GridView] onLongPress', item, index)
       self.startPoint = position
@@ -326,23 +378,35 @@ const GridView = memo((props: GridViewProps) => {
   const reorder = useCallback(
     (x: number, y: number) => {
       if (self.animation) return
-
+  
       const { numRows, cellSize, grid, items } = self
-
+  
       let colum = Math.floor((x + cellSize / 2) / cellSize)
       colum = Math.max(0, Math.min(numColumns, colum))
-
-      let row = Math.floor((y + cellSize / 2) / cellSize)
-      row = Math.max(0, Math.min(numRows, row))
-
+  
+      // Calculate the row index using dynamic row heights
+      let accumulatedHeight = 0;
+      let row = 0;
+      for (let rowIndex = 0; rowIndex < self.numRows; rowIndex++) {
+        const firstItemIndex = rowIndex * numColumns;
+        accumulatedHeight += getRowHeight(firstItemIndex);
+        if (y < accumulatedHeight) {
+          row = rowIndex;
+          break;
+        }
+      }
+  
       const index = Math.min(items.length - 1, colum + row * numColumns)
       const isLocked = locked && locked(items[index].item, index)
       const itemIndex = _.findIndex(items, (v) => v.item == selectedItem.item)
-
-      if (isLocked || itemIndex == index) return
-
-      swap(items, index, itemIndex)
-
+      // console.log('>>>', index, itemIndex, items.length - 1)
+      if (index === items.length - 1 || isLocked || itemIndex == index) return
+  
+      if (itemIndex !== index) {
+        const [movedItem] = items.splice(itemIndex, 1)
+        items.splice(index, 0, movedItem)
+      }
+  
       const animations = items.reduce((prev, curr, i) => {
         index != i &&
           prev.push(
@@ -355,7 +419,7 @@ const GridView = memo((props: GridViewProps) => {
           )
         return prev
       }, [] as Animated.CompositeAnimation[])
-
+  
       self.animation = Animated.parallel(animations)
       self.animation.start(() => (self.animation = undefined))
     },
@@ -395,18 +459,13 @@ const GridView = memo((props: GridViewProps) => {
     self.startPoint = undefined
     const { grid, items } = self
     const itemIndex = _.findIndex(items, (v) => v.item == selectedItem.item)
-    if(itemIndex >= 0 ){
-      const _newPos = grid[itemIndex];
+    itemIndex >= 0 &&
       Animated.timing(selectedItem.pos, {
-        toValue: _newPos,
+        toValue: grid[itemIndex],
         easing: Easing.out(Easing.quad),
         duration: 200,
         useNativeDriver: true,
-      }).start(() => {
-        items[itemIndex].pos.setValue({ x: _newPos.x, y: _newPos.y });
-        onEndRelease();
-      })
-    }
+      }).start(onEndRelease)
   }, [selectedItem])
 
   const onEndRelease = useCallback(() => {
@@ -414,6 +473,8 @@ const GridView = memo((props: GridViewProps) => {
     onReleaseCell && onReleaseCell(self.items.map((v) => v.item))
     setSelectedItem(undefined)
   }, [onReleaseCell])
+
+
 
   //-------------------------------------------------- Render
   const _renderItem = useCallback(
@@ -434,26 +495,34 @@ const GridView = memo((props: GridViewProps) => {
       }
 
       const { item, pos, opacity } = value
-      // console.log('[GridView] renderItem', index, pos)
       const { cellSize, grid } = self
       const p = grid[index]
       const isLocked = locked && locked(item, index)
       const key =
         (keyExtractor && keyExtractor(item)) ||
         (typeof item == 'string' ? item : `${index}`)
+        const rowHeight = getRowHeight(index)
+      // console.log('[GridView] renderItem', index, rowHeight)
+
       let style: ViewStyle = {
         position: 'absolute',
         width: cellSize,
-        height: cellSize,
+        height: rowHeight,
       }
 
-      const isSelected = selectedItem && value.item === selectedItem.item;
-      if (!isLocked && selectedItem && isSelected)
+      if (!isLocked && selectedItem && value.item == selectedItem.item)
         style = { zIndex: 1, ...style, ...selectedStyle }
 
       return isLocked ? (
         <View key={key} style={[style, { left: p.x, top: p.y }]}>
-          {renderLockedItem(item, index)}
+          {/* {renderLockedItem(item, index)} */}
+          <TouchableOpacity
+            style={{ flex: 1 }}
+            activeOpacity={activeOpacity}
+            onPress={() => onPressCell && onPressCell(item, index)}
+          >
+            {renderItem(item, index)}
+          </TouchableOpacity>
         </View>
       ) : (
         <Animated.View
@@ -488,7 +557,8 @@ const GridView = memo((props: GridViewProps) => {
       {...rest}
       ref={(ref) => (self.scrollView = ref)}
       onLayout={onLayout}
-      onScroll={onScroll}
+      onScroll={handleInternalScroll}
+      contentOffset={{ x: 0, y: self.scrollTop || 0 }} 
       scrollEnabled={!selectedItem}
       scrollEventThrottle={16}
       contentContainerStyle={{
@@ -498,11 +568,14 @@ const GridView = memo((props: GridViewProps) => {
         marginRight: right,
       }}
     >
-      <View
-        style={{
-          height: top + self.numRows * self.cellSize + bottom,
-        }}
-      />
+    <View
+      style={{
+        height: top + Array.from({ length: self.numRows }).reduce((acc: number, _, rowIndex) => {
+          const firstItemIndex = rowIndex * numColumns;
+          return acc + getRowHeight(firstItemIndex) as number;
+        }, 0) + bottom,
+      }}
+    />
       {self.items.map((v, i) => _renderItem(v, i))}
     </ScrollView>
   )
